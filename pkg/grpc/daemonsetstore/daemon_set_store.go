@@ -143,3 +143,5 @@ func watchedDaemonSetsToResp(watchedDaemonSets dsstore.WatchedDaemonSets) (*daem
 		Deleted: deleted,
 	}, nil
 }
+
+//go:generate protoconvert --from-pkg github.com/square/p2/pkg/grpc/daemonsetstore/protos --from-type DaemonSet --to-pkg github.com/square/p2/pkg/ds/fields --to-type DaemonSet --output-pkg daemonsetstore
