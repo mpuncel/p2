@@ -53,7 +53,7 @@ func (ConsulStore) Create(
 	}
 
 	return transaction.Add(ctx, api.KVTxnOp{
-		Verb:  string(api.KVSet),
+		Verb:  api.KVSet,
 		Key:   computeKey(audit.ID(uuid.New())),
 		Value: auditLogBytes,
 	})

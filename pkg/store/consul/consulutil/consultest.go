@@ -16,7 +16,9 @@ import (
 	"github.com/hashicorp/consul/api"
 	"github.com/hashicorp/consul/command/agent"
 	"github.com/hashicorp/consul/consul"
+	"github.com/hashicorp/consul/logger"
 	"github.com/hashicorp/consul/testutil"
+	"github.com/mitchellh/cli"
 )
 
 // Fixture sets up a test Consul server and provides the client configuration for
@@ -77,7 +79,11 @@ func NewFixture(t *testing.T) Fixture {
 	//
 	// config.ConsulConfig.RaftConfig.StartAsLeader = true
 
-	a, err := agent.Create(config, os.Stdout)
+	_, _, logWriter, _, ok := logger.Setup(nil, new(cli.PrefixedUi))
+	if !ok {
+		t.Fatal("couldn't set up a logger?")
+	}
+	a, err := agent.Create(config, os.Stdout, logWriter, nil)
 	if err != nil {
 		t.Fatal("creating Consul agent:", err)
 	}
