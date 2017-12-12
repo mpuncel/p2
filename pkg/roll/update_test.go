@@ -22,6 +22,9 @@ import (
 	"github.com/square/p2/pkg/store/consul"
 	"github.com/square/p2/pkg/store/consul/consulutil"
 	"github.com/square/p2/pkg/store/consul/rcstore"
+	"github.com/square/p2/pkg/store/consul/statusstore"
+	"github.com/square/p2/pkg/store/consul/statusstore/rcstatus"
+	"github.com/square/p2/pkg/store/consul/transaction"
 	"github.com/square/p2/pkg/types"
 
 	. "github.com/anthonybishopric/gotcha"
@@ -1106,4 +1109,79 @@ func TestRollLoopStallsIfUnhealthy(t *testing.T) {
 	cancel()
 	wg.Wait()
 	assertRollLoopResult(t, rollLoopResult, false)
+}
+
+func TestEnableAccountsForNodeTransfers(t *testing.T) {
+	fixture := consulutil.NewFixture(t)
+	defer fixture.Stop()
+
+	applicator := labels.NewConsulApplicator(fixture.Client, 0, 0)
+	rcStore := rcstore.NewConsul(fixture.Client, applicator, 0)
+	rcStatusStore := rcstatus.NewConsul(statusstore.NewConsul(fixture.Client), consul.RCStatusNamespace)
+
+	newRC, err := rcStore.Create(testManifest(), klabels.Everything(), "some_az", "some_cn", nil, nil, "dynamic_strategy")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = rcStore.Disable(newRC.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	oldRC, err := rcStore.Create(testManifest(), klabels.Everything(), "some_az", "some_cn", nil, nil, "dynamic_strategy")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// give the new RC one node
+	err = applicator.SetLabel(labels.POD, "some_pod", rc.RCIDLabel, newRC.ID.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = rcStore.SetDesiredReplicas(newRC.ID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	update := &update{
+		Update: fields.Update{
+			NewRC: newRC.ID,
+			OldRC: oldRC.ID,
+		},
+		rcStore:       rcStore,
+		rcStatusStore: rcStatusStore,
+		txner:         fixture.Client.KV(),
+	}
+
+	// Now try to enable, it should work because 1 current node == 1 replicas desired
+	ctx, cancel := transaction.New(context.Background())
+	defer cancel()
+	err = update.enable(ctx)
+	if err != nil {
+		t.Fatalf("expected enable to work when new RC replica count == new RC current pod count: %s", err)
+	}
+
+	// confirm that the new RC got enabled and the old RC got disabled
+	oldRC, err = rcStore.Get(oldRC.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !oldRC.Disabled {
+		t.Fatal("expected the old RC to be disabled")
+	}
+	newRC, err = rcStore.Get(oldRC.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !newRC.Disabled {
+		t.Fatal("expected the new RC to be disabled")
+	}
+}
+
+func testManifest() manifest.Manifest {
+	builder := manifest.NewBuilder()
+	builder.SetID("whatever")
+	return builder.GetManifest()
 }

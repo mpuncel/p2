@@ -6,8 +6,6 @@ import (
 	"os"
 	"time"
 
-	"github.com/Sirupsen/logrus"
-
 	"github.com/square/p2/pkg/alerting"
 	"github.com/square/p2/pkg/health"
 	"github.com/square/p2/pkg/health/checker"
@@ -21,9 +19,14 @@ import (
 	"github.com/square/p2/pkg/store/consul"
 	"github.com/square/p2/pkg/store/consul/consulutil"
 	"github.com/square/p2/pkg/store/consul/rcstore"
+	"github.com/square/p2/pkg/store/consul/statusstore"
+	"github.com/square/p2/pkg/store/consul/statusstore/rcstatus"
 	"github.com/square/p2/pkg/store/consul/transaction"
 	"github.com/square/p2/pkg/types"
 	"github.com/square/p2/pkg/util"
+
+	"github.com/Sirupsen/logrus"
+	"github.com/hashicorp/consul/api"
 )
 
 type Store interface {
@@ -54,15 +57,16 @@ type ReplicationControllerStore interface {
 type update struct {
 	fields.Update
 
-	consuls      Store
-	consulClient consulutil.ConsulClient
-	rcStore      ReplicationControllerStore
-	rollStore    RollingUpdateStore
-	rcLocker     ReplicationControllerLocker
-	hcheck       checker.ConsulHealthChecker
-	hclient      hclient.HealthServiceClient
-	labeler      rc.LabelMatcher
-	txner        transaction.Txner
+	consuls       Store
+	consulClient  consulutil.ConsulClient
+	rcStore       ReplicationControllerStore
+	rcStatusStore RCStatusStore
+	rollStore     RollingUpdateStore
+	rcLocker      ReplicationControllerLocker
+	hcheck        checker.ConsulHealthChecker
+	hclient       hclient.HealthServiceClient
+	labeler       rc.LabelMatcher
+	txner         transaction.Txner
 
 	logger logging.Logger
 
@@ -82,6 +86,10 @@ type update struct {
 	scheduler RCScheduler
 }
 
+type RCStatusStore interface {
+	Get(rcID rcf.ID) (rcstatus.Status, *api.QueryMeta, error)
+}
+
 // Create a new Update. The consul.Store, rcstore.Store, labels.Applicator and
 // scheduler.Scheduler arguments should be the same as those of the RCs themselves. The
 // session must be valid for the lifetime of the Update; maintaining this is the
@@ -92,6 +100,7 @@ func NewUpdate(
 	consulClient consulutil.ConsulClient,
 	rcLocker ReplicationControllerLocker,
 	rcStore ReplicationControllerStore,
+	rcStatusStore RCStatusStore,
 	rollStore RollingUpdateStore,
 	txner transaction.Txner,
 	hcheck checker.ConsulHealthChecker,
@@ -108,20 +117,21 @@ func NewUpdate(
 		"minimum_replicas": f.MinimumReplicas,
 	})
 	return &update{
-		Update:       f,
-		consuls:      consuls,
-		rcLocker:     rcLocker,
-		rcStore:      rcStore,
-		rollStore:    rollStore,
-		txner:        txner,
-		hcheck:       hcheck,
-		hclient:      hclient,
-		labeler:      labeler,
-		logger:       logger,
-		watchDelay:   watchDelay,
-		alerter:      alerter,
-		consulClient: consulClient,
-		scheduler:    scheduler,
+		Update:        f,
+		consuls:       consuls,
+		rcLocker:      rcLocker,
+		rcStore:       rcStore,
+		rcStatusStore: rcStatusStore,
+		rollStore:     rollStore,
+		txner:         txner,
+		hcheck:        hcheck,
+		hclient:       hclient,
+		labeler:       labeler,
+		logger:        logger,
+		watchDelay:    watchDelay,
+		alerter:       alerter,
+		consulClient:  consulClient,
+		scheduler:     scheduler,
 	}
 }
 
@@ -268,6 +278,7 @@ func (u *update) Run(ctx context.Context) (ret bool) {
 	u.logger.NoFields().Debugln("Enabling")
 	err = u.enable(checkRCLocksCtx)
 	if err != nil {
+		u.logger.WithError(err).Errorln("could not enable TCs")
 		return false
 	}
 
@@ -646,8 +657,42 @@ func (u *update) enable(checkLocksCtx context.Context) error {
 			return err
 		}
 
-		if len(currentPods) != newRC.ReplicasDesired {
-			// enable is called in a RetryOrQuit,
+		// Special case: if current pods == replicaCount + 1, we should check if this is only the case because
+		// a node transfer is happening
+		if len(currentPods) == newRC.ReplicasDesired+1 {
+			rcStatus, _, err := u.rcStatusStore.Get(u.NewRC)
+			switch {
+			case statusstore.IsNoStatus(err):
+			case err != nil:
+				return util.Errorf("could not check RC status: %s", err)
+			default:
+				// If a node transfer is in progress, and the
+				// current pods we counted include both the old
+				// node and the new node of the node transfer,
+				// then the RC effectively has one node less
+				// than CurrentPods() shows
+				if rcStatus.NodeTransfer == nil {
+					// release the RU and let another farm try later
+					return util.Errorf("RC %s currently has %d replicas but wants %d - waiting until it matches to enable.", u.NewRC, len(currentPods), newRC.ReplicasDesired)
+				}
+
+				oldNodeIncluded := false
+				newNodeIncluded := false
+				for _, node := range currentPods.Nodes() {
+					if node == rcStatus.NodeTransfer.NewNode {
+						newNodeIncluded = true
+					}
+					if node == rcStatus.NodeTransfer.OldNode {
+						oldNodeIncluded = true
+					}
+				}
+
+				if !oldNodeIncluded || !newNodeIncluded {
+					// release the RU and let another farm try later
+					return util.Errorf("RC %s currently has %d replicas but wants %d - waiting until it matches to enable.", u.NewRC, len(currentPods), newRC.ReplicasDesired)
+				}
+			}
+		} else {
 			return util.Errorf("RC %s currently has %d replicas but wants %d - waiting until it matches to enable.", u.NewRC, len(currentPods), newRC.ReplicasDesired)
 		}
 	}
