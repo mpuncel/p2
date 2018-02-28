@@ -9,6 +9,7 @@ package opencontainer
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io/ioutil"
 	"os"
 	"os/exec"
@@ -76,6 +77,7 @@ func (l *Launchable) getSpec() (*Spec, error) {
 	if err != nil {
 		return nil, err
 	}
+	fmt.Println(string(data))
 	l.spec = &spec
 	return l.spec, nil
 }
@@ -128,6 +130,8 @@ func (l *Launchable) Executables(serviceBuilder *runit.ServiceBuilder) ([]launch
 	if err != nil {
 		return nil, util.Errorf("%s: loading container specification: %s", l.ServiceID_, err)
 	}
+	fmt.Println(lspec.Process.User.UID)
+	fmt.Println(lspec.Process.User.GID)
 
 	uid, gid, err := user.IDs(l.RunAs)
 	if err != nil {
