@@ -250,6 +250,7 @@ func (l *Launchable) Launch(_ *runit.ServiceBuilder, _ runit.SV) error {
 			}
 		}
 	}
+	init := true
 	hostConfig := &container.HostConfig{
 		Binds:       bindings,
 		NetworkMode: "host",
@@ -265,6 +266,7 @@ func (l *Launchable) Launch(_ *runit.ServiceBuilder, _ runit.SV) error {
 			Memory:       l.CgroupMemorySize.Int64(),
 		},
 		ReadonlyRootfs: true,
+		Init:           &init,
 	}
 	// this should be ignored since we're using "host"
 	networkingConfig := &network.NetworkingConfig{}
